@@ -15,7 +15,7 @@
 // OAuth2 do app no Discord Developer Portal.
 // ============================================================================
 
-const crypto = require('crypto');
+import crypto from 'crypto';
 
 const {
   OAUTH2_CLIENT_ID,
@@ -189,6 +189,167 @@ async function boot() {
     state.me = await api('/api/dashboard/me');
     if (!state.guildId && state.me.guilds.length) state.guildId = state.me.guilds[0].id;
     if (!state.me.guilds.length) { app.innerHTML = '<div class="login-screen"><h1>🚫 Sem acesso</h1><p>Sua conta não tem staff/admin em nenhum servidor.</p><a class="btn-discord" href="/dashboard/logout">Sair</a></div>'; return; }
+    await carregarPerms();
+    renderLayout();
+  } catch { renderLogin(); }
+}
+async function carregarPerms() {
+  try { state.perms = await api('/api/dashboard/guilds/'+state.guildId+'/permissions'); }
+  catch { state.perms = { dono:false, administrator:false, manageGuild:false, banMembers:false, kickMembers:false, moderateMembers:false, staffInterno:false }; }
+}
+function renderLayout() {
+  const { me, perms } = state;
+  const podeConfig = perms.dono || perms.administrator || perms.manageGuild;
+  app.innerHTML = '<div class="layout"><div class="sidebar"><div class="user"><img src="'+me.usuario.avatar+'"><div><div class="name">'+me.usuario.nome+'</div><a href="/dashboard/logout">Sair</a></div></div>'
+    + '<select class="guild-select" id="guildSelect">' + me.guilds.map(g => '<option value="'+g.id+'"'+(g.id===state.guildId?' selected':'')+'>'+g.nome+'</option>').join('') + '</select>'
+    + '<div class="nav"><button data-tab="stats">📊 Estatísticas</button>' + (podeConfig ? '<button data-tab="config">⚙️ Sistemas</button>' : '') + '<button data-tab="mod">🛡️ Moderação</button></div>'
+    + '</div><div class="main" id="main"></div></div>';
+  if (state.tab === 'config' && !podeConfig) state.tab = 'stats';
+  document.getElementById('guildSelect').onchange = async e => { state.guildId = e.target.value; await carregarPerms(); renderLayout(); };
+  document.querySelectorAll('.nav button').forEach(b => b.onclick = () => { state.tab = b.dataset.tab; renderTab(); });
+  renderTab();
+}
+function renderTab() {
+  document.querySelectorAll('.nav button').forEach(b => b.classList.toggle('active', b.dataset.tab === state.tab));
+  if (state.tab === 'stats') return renderStats();
+  if (state.tab === 'config') return renderConfig();
+  if (state.tab === 'mod') return renderMod();
+}
+function fmtUptime(ms) {
+  const s = Math.floor(ms/1000), d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60);
+  return d+'d '+h+'h '+m+'m';
+}
+async function renderStats() {
+  const main = document.getElementById('main');
+  main.innerHTML = '<h2>📊 Estatísticas</h2><div class="loading" style="height:auto;padding:30px 0">Carregando…</div>';
+  try {
+    const s = await api('/api/dashboard/guilds/'+state.guildId+'/stats');
+    main.innerHTML = '<h2>📊 '+s.nome+'</h2><div class="stat-grid">'
+      + '<div class="stat-card"><div class="label">Membros</div><div class="value">'+s.membros+'</div></div>'
+      + '<div class="stat-card"><div class="label">Online</div><div class="value">'+s.online+'</div></div>'
+      + '<div class="stat-card"><div class="label">Canais</div><div class="value">'+s.canais+'</div></div>'
+      + '<div class="stat-card"><div class="label">Cargos</div><div class="value">'+s.cargos+'</div></div>'
+      + '<div class="stat-card"><div class="label">Boosts</div><div class="value">'+s.boosts+' (nível '+s.nivelBoost+')</div></div>'
+      + '<div class="stat-card"><div class="label">Ping do bot</div><div class="value">'+s.botPingMs+'ms</div></div>'
+      + '<div class="stat-card"><div class="label">Uptime do bot</div><div class="value">'+fmtUptime(s.botUptimeMs)+'</div></div>'
+      + '<div class="stat-card"><div class="label">Servidores com o bot</div><div class="value">'+s.totalServidoresBot+'</div></div></div>';
+  } catch (err) { main.innerHTML = '<h2>📊 Estatísticas</h2><p style="color:#ff9b9d">'+err.message+'</p>'; }
+}
+async function renderConfig() {
+  const main = document.getElementById('main');
+  main.innerHTML = '<h2>⚙️ Sistemas</h2><div class="loading" style="height:auto;padding:30px 0">Carregando…</div>';
+  try {
+    const cfg = await api('/api/dashboard/guilds/'+state.guildId+'/config');
+    const chaves = Object.keys(cfg);
+    if (!chaves.length) { main.innerHTML = '<h2>⚙️ Sistemas</h2><p style="color:#8a8aa0">Nenhum sistema registrado ainda.</p>'; return; }
+    main.innerHTML = '<h2>⚙️ Sistemas</h2>' + chaves.map(chave => {
+      const s = cfg[chave];
+      return '<div class="config-item"><div class="info"><div class="title">'+s.label+'</div><div class="desc">'+s.desc+'</div></div>'
+        + '<label class="switch"><input type="checkbox" data-chave="'+chave+'" '+(s.valor?'checked':'')+'><span class="slider"></span></label></div>';
+    }).join('');
+    main.querySelectorAll('input[type=checkbox]').forEach(inp => {
+      inp.onchange = async () => {
+        const chave = inp.dataset.chave;
+        try {
+          await api('/api/dashboard/guilds/'+state.guildId+'/config/'+chave, { method:'POST', body: JSON.stringify({ valor: inp.checked }) });
+          toast(chave+': '+(inp.checked?'ativado':'desativado'));
+        } catch (err) { inp.checked = !inp.checked; toast(err.message, false); }
+      };
+    });
+  } catch (err) { main.innerHTML = '<h2>⚙️ Sistemas</h2><p style="color:#ff9b9d">'+err.message+'</p>'; }
+}
+function renderMod() {
+  const main = document.getElementById('main');
+  const p = state.perms;
+  const podeBan = p.dono || p.administrator || p.banMembers;
+  const podeKick = p.dono || p.administrator || p.kickMembers;
+  const podeMute = p.dono || p.administrator || p.moderateMembers;
+  if (!podeBan && !podeKick && !podeMute) {
+    main.innerHTML = '<h2>🛡️ Moderação</h2><p style="color:#8a8aa0">Você não tem permissão de banir, expulsar ou silenciar nesse servidor.</p>';
+    return;
+  }
+  main.innerHTML = '<h2>🛡️ Moderação</h2><div class="search-row"><input id="searchInput" placeholder="Buscar por nome ou ID do membro…"><button class="btn btn-primary" id="searchBtn">Buscar</button></div><div id="results"></div>';
+  const doSearch = async () => {
+    const q = document.getElementById('searchInput').value.trim();
+    const results = document.getElementById('results');
+    if (!q) return;
+    results.innerHTML = '<div class="loading" style="height:auto;padding:20px 0">Buscando…</div>';
+    try {
+      const membros = await api('/api/dashboard/guilds/'+state.guildId+'/members/search?q='+encodeURIComponent(q));
+      if (!membros.length) { results.innerHTML = '<p style="color:#8a8aa0">Nenhum membro encontrado.</p>'; return; }
+      results.innerHTML = membros.map(m => '<div class="member-card" data-id="'+m.id+'"><img src="'+m.avatar+'">'
+        + '<div class="info"><div class="tag">'+m.tag+'</div><div class="role">'+(m.cargoMaisAlto||'')+(m.timeoutAte && m.timeoutAte>Date.now()?' · ⏱️ silenciado':'')+'</div></div>'
+        + '<div class="actions">'
+        + (podeMute ? '<button class="btn btn-warn" data-acao="timeout">Silenciar 10min</button><button class="btn btn-muted" data-acao="untimeout">Remover silêncio</button>' : '')
+        + (podeKick ? '<button class="btn btn-danger" data-acao="kick">Expulsar</button>' : '')
+        + (podeBan ? '<button class="btn btn-danger" data-acao="ban">Banir</button>' : '')
+        + '</div></div>').join('');
+      results.querySelectorAll('button[data-acao]').forEach(btn => btn.onclick = () => executarAcao(btn.closest('.member-card').dataset.id, btn.dataset.acao));
+    } catch (err) { results.innerHTML = '<p style="color:#ff9b9d">'+err.message+'</p>'; }
+  };
+  document.getElementById('searchBtn').onclick = doSearch;
+  document.getElementById('searchInput').onkeydown = e => { if (e.key==='Enter') doSearch(); };
+}
+async function executarAcao(userId, acao) {
+  let motivo = '';
+  if (acao === 'ban' || acao === 'kick') {
+    motivo = prompt('Motivo ('+(acao==='ban'?'banir':'expulsar')+'):') || '';
+    if (!confirm('Confirmar '+(acao==='ban'?'banimento':'expulsão')+'?')) return;
+  }
+  try {
+    await api('/api/dashboard/guilds/'+state.guildId+'/members/'+userId+'/'+acao, { method:'POST', body: JSON.stringify({ motivo, minutos: 10 }) });
+    toast('Ação aplicada com sucesso.');
+    renderMod();
+  } catch (err) { toast(err.message, false); }
+}
+boot();
+</script></body></html>`;
+}
+
+// ============================================================================
+// HANDLER PRINCIPAL — roteia manualmente com base na URL
+// ============================================================================
+export default async function handler(req, res) {
+  const url = new URL(req.url, `https://${req.headers.host}`);
+  const pathname = url.pathname;
+
+  // Lê o corpo JSON em requisições POST (Vercel não faz isso sozinho aqui)
+  async function readBody() {
+    if (req.method !== 'POST') return {};
+    return await new Promise(resolve => {
+      let raw = '';
+      req.on('data', c => raw += c);
+      req.on('end', () => { try { resolve(JSON.parse(raw || '{}')); } catch { resolve({}); } });
+    });
+  }
+
+  try {
+    // ── Login ──────────────────────────────────────────────────────────────
+    if (pathname === '/dashboard/login') {
+      const state = newState();
+      const params = new URLSearchParams({
+        client_id: OAUTH2_CLIENT_ID, redirect_uri: DASHBOARD_REDIRECT_URI,
+        response_type: 'code', scope: 'identify', state, prompt: 'consent',
+      });
+      res.statusCode = 302;
+      res.setHeader('Location', `https://discord.com/oauth2/authorize?${params.toString()}`);
+      return res.end();
+    }
+
+    if (pathname === '/dashboard/callback') {
+      const code = url.searchParams.get('code');
+      const st = url.searchParams.get('state');
+      if (!code || !st || !validState(st)) return sendHtml(res, 400, 'Requisição inválida ou expirada. Tente logar novamente.');
+
+      const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: OAUTH2_CLIENT_ID, client_secret: OAUTH2_CLIENT_SECRET,
+          grant_type: 'authorization_code', code, redirect_uri: DASHBOARD_REDIRECT_URI,
+        }),
+      });
+      const tokenData = await tokenRes.json();
+      if (!tokenData.access_token) return sendHtml(res, 500, 'Erro ate.me.guilds.length) { app.innerHTML = '<div class="login-screen"><h1>🚫 Sem acesso</h1><p>Sua conta não tem staff/admin em nenhum servidor.</p><a class="btn-discord" href="/dashboard/logout">Sair</a></div>'; return; }
     await carregarPerms();
     renderLayout();
   } catch { renderLogin(); }
