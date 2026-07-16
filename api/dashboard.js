@@ -559,7 +559,7 @@ boot();
 // ============================================================================
 // HANDLER PRINCIPAL — roteia manualmente com base na URL
 // ============================================================================
-export default async function handler(req, res) {
+export default async function dashboardHandler(req, res, next) {
   const url = new URL(req.url, `https://${req.headers.host}`);
   const pathname = url.pathname;
 
@@ -745,7 +745,7 @@ export default async function handler(req, res) {
       return sendJson(res, 404, { erro: 'Rota não encontrada.' });
     }
 
-    return sendHtml(res, 404, 'Página não encontrada.');
+    return next ? next() : sendHtml(res, 404, 'Página não encontrada.');
   } catch (err) {
     return sendJson(res, 500, { erro: 'Erro interno.', detalhe: err?.message });
   }
