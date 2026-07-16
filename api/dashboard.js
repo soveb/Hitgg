@@ -24,7 +24,23 @@ const {
   SESSION_SECRET,
   BOT_API_BASE_URL,
   DASHBOARD_API_SECRET,
+  DASHBOARD_PASSWORD,   // senha alternativa de login (opcional)
+  DASHBOARD_OWNER_ID,   // ID Discord usado na sessão quando loga por senha
 } = process.env;
+
+// ── Comparação segura de senha (evita timing attack) ────────────────────────
+function senhaValida(informada) {
+  const correta = DASHBOARD_PASSWORD || '';
+  if (!correta) return false;
+  const a = Buffer.from(String(informada || ''));
+  const b = Buffer.from(correta);
+  if (a.length !== b.length) {
+    // ainda faz uma comparação de tamanho fixo pra não vazar timing por length
+    crypto.timingSafeEqual(Buffer.alloc(32), Buffer.alloc(32));
+    return false;
+  }
+  return crypto.timingSafeEqual(a, b);
+}
 
 // ── Assinatura de cookie (sessão fica inteira dentro do cookie, sem memória) ──
 function sign(value) {
@@ -182,7 +198,33 @@ function toast(msg, ok=true) {
   setTimeout(() => t.remove(), 3500);
 }
 function renderLogin() {
-  app.innerHTML = '<div class="login-screen"><h1>🔒 VTX Dashboard</h1><p>Faça login com sua conta Discord. Só quem tem cargo de staff/admin em algum servidor gerenciado pelo bot consegue entrar.</p><a class="btn-discord" href="/dashboard/login">Entrar com Discord</a></div>';
+  app.innerHTML = '<div class="login-screen"><h1>🔒 VTX Dashboard</h1><p>Faça login com sua conta Discord. Só quem tem cargo de staff/admin em algum servidor gerenciado pelo bot consegue entrar.</p><a class="btn-discord" href="/dashboard/login">Entrar com Discord</a>'
+    + '<div style="display:flex;align-items:center;gap:10px;width:220px;color:#5a5a6e;font-size:12px;margin-top:6px"><div style="flex:1;height:1px;background:#2c2c3a"></div>ou<div style="flex:1;height:1px;background:#2c2c3a"></div></div>'
+    + '<div style="display:flex;flex-direction:column;gap:8px;align-items:center;width:220px">'
+    + '<input id="senhaInput" type="password" placeholder="Senha do dashboard" style="width:100%;padding:10px 12px;border-radius:8px;background:#1c1c26;border:1px solid #2c2c3a;color:#fff;text-align:center;box-sizing:border-box">'
+    + '<button id="senhaBtn" class="btn btn-primary" style="width:100%">Entrar com senha</button>'
+    + '<p id="senhaErro" style="color:#ff9b9d;font-size:13px;margin:0;display:none"></p>'
+    + '</div></div>';
+  const senhaInput = document.getElementById('senhaInput');
+  const senhaErro = document.getElementById('senhaErro');
+  const tentarSenha = async () => {
+    senhaErro.style.display = 'none';
+    try {
+      const r = await fetch('/dashboard/login-senha', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ senha: senhaInput.value }) });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        senhaErro.textContent = d.erro || 'Senha incorreta.';
+        senhaErro.style.display = 'block';
+        return;
+      }
+      location.href = '/dashboard';
+    } catch {
+      senhaErro.textContent = 'Erro de conexão. Tente novamente.';
+      senhaErro.style.display = 'block';
+    }
+  };
+  document.getElementById('senhaBtn').onclick = tentarSenha;
+  senhaInput.onkeydown = e => { if (e.key === 'Enter') tentarSenha(); };
 }
 async function boot() {
   try {
@@ -369,6 +411,20 @@ export default async function handler(req, res) {
       res.statusCode = 302;
       res.setHeader('Location', '/dashboard');
       return res.end();
+    }
+
+    if (pathname === '/dashboard/login-senha' && req.method === 'POST') {
+      const body = await readBody();
+      if (!senhaValida(body?.senha)) return sendJson(res, 401, { erro: 'Senha incorreta.' });
+      if (!DASHBOARD_OWNER_ID) return sendJson(res, 500, { erro: 'DASHBOARD_OWNER_ID não configurado na Vercel.' });
+
+      setSessionCookie(res, {
+        id: DASHBOARD_OWNER_ID,
+        nome: 'Acesso por senha',
+        avatar: 'https://cdn.discordapp.com/embed/avatars/0.png',
+        exp: Date.now() + 12 * 60 * 60 * 1000,
+      });
+      return sendJson(res, 200, { ok: true });
     }
 
     if (pathname === '/dashboard/logout') {
